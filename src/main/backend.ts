@@ -206,7 +206,7 @@ export class MainBackend extends BaseBackend<ElectronOptions> implements CommonB
     const reporter: CrashReporterExt = crashReporter as any;
     const crashesDirectory = reporter.getCrashesDirectory();
 
-    this._uploader = new MinidumpUploader(dsn, crashesDirectory, getCachePath());
+    this._uploader = new MinidumpUploader(dsn, crashesDirectory, getCachePath(), this._options.beforeSend);
 
     // Flush already cached minidumps from the queue.
     forget(this._uploader.flushQueue());

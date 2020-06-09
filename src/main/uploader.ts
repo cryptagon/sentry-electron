@@ -1,4 +1,4 @@
-import { Event } from '@sentry/types';
+import { Event, EventHint } from '@sentry/types';
 import { Dsn, logger } from '@sentry/utils';
 import fetch from 'electron-fetch';
 import FormData = require('form-data');
@@ -18,7 +18,7 @@ const unlink = promisify(fs.unlink);
 const CODE_RETRY = 429;
 
 /** Maximum number of days to keep a minidump before deleting it. */
-const MAX_AGE = 30;
+const MAX_AGE = 10;
 
 /** Maximum number of requests that we store/queue if something goes wrong. */
 const MAX_REQUESTS_COUNT = 10;
@@ -59,6 +59,8 @@ export class MinidumpUploader {
   /** A persistent directory to cache minidumps. */
   private readonly _cacheDirectory: string;
 
+  private _beforeSend?: (event: Event, hint?: EventHint) => PromiseLike<Event | null> | Event | null;
+
   /**
    * Store to persist queued Minidumps beyond application crashes or lost
    * internet connection.
@@ -72,7 +74,12 @@ export class MinidumpUploader {
    * @param crashesDirectory The directory Electron stores crashes in.
    * @param cacheDirectory A persistent directory to cache minidumps.
    */
-  public constructor(dsn: Dsn, crashesDirectory: string, cacheDirectory: string) {
+  public constructor(
+    dsn: Dsn,
+    crashesDirectory: string,
+    cacheDirectory: string,
+    beforeSend?: (event: Event, hint?: EventHint) => PromiseLike<Event | null> | Event | null,
+  ) {
     const crashpadWindows = process.platform === 'win32' && parseInt(process.versions.electron.split('.')[0], 10) >= 6;
     this._type = process.platform === 'darwin' || crashpadWindows ? 'crashpad' : 'breakpad';
     this._crashpadSubDirectory = process.platform === 'darwin' ? 'completed' : 'reports';
@@ -82,6 +89,7 @@ export class MinidumpUploader {
     this._crashesDirectory = crashesDirectory;
     this._cacheDirectory = cacheDirectory;
     this._queue = new Store(this._cacheDirectory, 'queue', []);
+    this._beforeSend = beforeSend;
   }
 
   /**
@@ -106,14 +114,20 @@ export class MinidumpUploader {
     logger.log('Uploading minidump', request.path);
 
     try {
-      const body = new FormData();
-      body.append('upload_file_minidump', fs.createReadStream(request.path));
-      body.append('sentry', JSON.stringify(request.event));
-      const response = await fetch(this._url, { method: 'POST', body });
+      const event = this._beforeSend ? this._beforeSend(request.event) : request.event;
+      let response = { ok: true, status: 200 };
+      if (event !== null) {
+        const body = new FormData();
+        body.append('upload_file_minidump', fs.createReadStream(request.path));
+        body.append('sentry', JSON.stringify(event));
+        response = await fetch(this._url, { method: 'POST', body });
 
-      // Too many requests, so we queue the event and send it later
-      if (response.status === CODE_RETRY) {
-        await this._queueMinidump(request);
+        // Too many requests, so we queue the event and send it later
+        if (response.status === CODE_RETRY) {
+          await this._queueMinidump(request);
+        }
+      } else {
+        logger.log('Skipping minidump upload');
       }
 
       // We either succeeded or something went horribly wrong. Either way, we
